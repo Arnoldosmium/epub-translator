@@ -2,12 +2,13 @@ import hashlib
 import json
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Self
 
 from .executor import LLMExecutor
 from .increasable import Increasable, Increaser
-from .types import Message, MessageRole
+from .types import Message, MessageRole, TokenUsage
 
 # Global lock for cache file commit operations
 _CACHE_COMMIT_LOCK = threading.Lock()
@@ -21,14 +22,23 @@ class LLMContext:
         cache_seed_content: str | None,
         top_p: Increasable,
         temperature: Increasable,
+        max_tokens: int | None = None,
+        on_usage: Callable[[TokenUsage], None] | None = None,
     ) -> None:
         self._executor = executor
         self._cache_path = cache_path
         self._cache_seed_content = cache_seed_content
         self._top_p: Increaser = top_p.context()
         self._temperature: Increaser = temperature.context()
+        self._max_tokens: int | None = max_tokens
         self._context_id = uuid.uuid4().hex[:12]
         self._temp_files: set[Path] = set()
+        self._total_usage = TokenUsage()
+        self._on_usage = on_usage
+
+    @property
+    def total_usage(self) -> TokenUsage:
+        return self._total_usage
 
     def __enter__(self) -> Self:
         return self
@@ -67,15 +77,23 @@ class LLMContext:
                 temperature = self._temperature.current
             if top_p is None:
                 top_p = self._top_p.current
+            if max_tokens is None:
+                max_tokens = self._max_tokens
 
             # Make the actual request
-            response = self._executor.request(
+            response, usage = self._executor.request(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 cache_key=cache_key,
             )
+
+            # Track token usage
+            self._total_usage += usage
+            if self._on_usage is not None:
+                self._on_usage(usage)
+
             # Save to temporary cache if cache_path is set
             if self._cache_path is not None and cache_key is not None:
                 temp_cache_file = self._cache_path / f"{cache_key}.{self._context_id}.txt"

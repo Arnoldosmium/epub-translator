@@ -13,7 +13,7 @@ from ..template import create_env
 from .context import LLMContext
 from .executor import LLMExecutor
 from .increasable import Increasable
-from .types import Message
+from .types import Message, TokenUsage
 
 # Global state for logger filename generation
 _LOGGER_LOCK = threading.Lock()
@@ -31,6 +31,7 @@ class LLM:
         timeout: float | None = None,
         top_p: float | tuple[float, float] | None = None,
         temperature: float | tuple[float, float] | None = None,
+        max_tokens: int | None = None,
         retry_times: int = 5,
         retry_interval_seconds: float = 6.0,
         cache_path: PathLike | str | None = None,
@@ -42,8 +43,11 @@ class LLM:
         self._env: Environment = create_env(prompts_path)
         self._top_p: Increasable = Increasable(top_p)
         self._temperature: Increasable = Increasable(temperature)
+        self._max_tokens: int | None = max_tokens
         self._cache_path: Path | None = self._ensure_dir_path(cache_path)
         self._logger_save_path: Path | None = self._ensure_dir_path(log_dir_path)
+        self._total_usage = TokenUsage()
+        self._usage_lock = threading.Lock()
 
         self._executor = LLMExecutor(
             url=url,
@@ -59,6 +63,19 @@ class LLM:
     def encoding(self) -> Encoding:
         return self._encoding
 
+    @property
+    def total_usage(self) -> TokenUsage:
+        with self._usage_lock:
+            return TokenUsage(
+                prompt_tokens=self._total_usage.prompt_tokens,
+                completion_tokens=self._total_usage.completion_tokens,
+                total_tokens=self._total_usage.total_tokens,
+            )
+
+    def _on_usage(self, usage: TokenUsage) -> None:
+        with self._usage_lock:
+            self._total_usage += usage
+
     def context(self, cache_seed_content: str | None = None) -> LLMContext:
         return LLMContext(
             executor=self._executor,
@@ -66,6 +83,8 @@ class LLM:
             cache_seed_content=cache_seed_content,
             top_p=self._top_p,
             temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            on_usage=self._on_usage,
         )
 
     def request(
